@@ -1,0 +1,179 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Combat.Config)
+local Net = require(ReplicatedStorage.Combat.Net)
+
+local Modules = script.Modules
+local Fighter = require(Modules.Fighter)
+local Hitbox = require(Modules.Hitbox)
+local Damage = require(Modules.Damage)
+
+local CombatService = {}
+CombatService.__index = CombatService
+
+function CombatService.new()
+	local self = setmetatable({}, CombatService)
+	self.net = Net.get()
+	self.fighters = {}
+	self.lastReq = {}
+	return self
+end
+
+function CombatService:Start()
+	Players.PlayerAdded:Connect(function(plr)
+		self:_bind(plr)
+	end)
+
+	Players.PlayerRemoving:Connect(function(plr)
+		self:_drop(plr)
+	end)
+
+	for _, plr in Players:GetPlayers() do
+		self:_bind(plr)
+	end
+
+	self.net.Action.OnServerEvent:Connect(function(plr, action, data)
+		self:_onAction(plr, action, data)
+	end)
+end
+
+function CombatService:_bind(plr)
+	local function charAdded(char)
+		if self.fighters[plr] then
+			self.fighters[plr]:Destroy()
+		end
+
+		self.fighters[plr] = Fighter.new(plr, char)
+	end
+
+	if plr.Character then
+		charAdded(plr.Character)
+	end
+
+	plr.CharacterAdded:Connect(charAdded)
+end
+
+function CombatService:_drop(plr)
+	local fighter = self.fighters[plr]
+	if fighter then
+		fighter:Destroy()
+	end
+
+	self.fighters[plr] = nil
+	self.lastReq[plr] = nil
+end
+
+function CombatService:_onAction(plr, action, data)
+	local fighter = self.fighters[plr]
+	if not fighter or not fighter:Alive() then
+		return
+	end
+
+	if action == "Light" then
+		if not self:_rate(plr, action) then
+			return
+		end
+
+		self:_light(fighter)
+	elseif action == "Block" then
+		fighter:SetBlock(data == true)
+	elseif action == "Parry" then
+		if not self:_rate(plr, action) then
+			return
+		end
+
+		self:_parry(fighter)
+	end
+end
+
+function CombatService:_rate(plr, action)
+	local now = os.clock()
+	local key = plr.UserId .. ":" .. action
+
+	if now - (self.lastReq[key] or 0) < Config.RemoteRate then
+		return false
+	end
+
+	self.lastReq[key] = now
+	return true
+end
+
+function CombatService:_light(fighter)
+	local move = Config.Moves.Light
+	if not fighter:CanAttack("Light") then
+		return
+	end
+
+	local step = fighter:NextCombo(move.Combo, Config.ComboReset)
+	fighter:StartAttack("Light", move.Cooldown)
+	self:_fx(Config.Fx.Swing, fighter.Root.Position, fighter.Player)
+
+	local animLen = fighter.Anim:Play(move.Anims[step], move.Windup + move.Active + move.Recovery)
+
+	task.delay(move.Windup, function()
+		if not fighter:Alive() or not fighter:HasState("attacking") then
+			return
+		end
+
+		local cf = fighter.Root.CFrame * move.Offset
+		local targets = Hitbox.box(fighter.Char, cf, move.Box)
+
+		for _, hum in targets do
+			local victim = self:_fighterFromHum(hum)
+			local info = Damage.apply(fighter, victim, hum, {
+				Amount = move.Damage,
+				Stun = move.Stun,
+				Knockback = step == move.Combo and move.FinalKnockback or move.Knockback,
+				CanParry = true,
+			})
+
+			if info.Hit then
+				self:_fx(info.Fx, info.Pos, fighter.Player)
+			end
+		end
+	end)
+
+	local doneIn = math.max(move.Windup + move.Active + move.Recovery, animLen)
+	task.delay(doneIn, function()
+		if fighter:Alive() then
+			fighter:EndAttack()
+		end
+	end)
+end
+
+function CombatService:_parry(fighter)
+	local move = Config.Moves.Parry
+	if not fighter:CanParry("Parry", move.Cooldown) then
+		return
+	end
+
+	fighter:AddState("parrying", move.Window)
+	fighter.Anim:Play(move.Anim, move.Window)
+end
+
+function CombatService:_fx(name, pos, source)
+	self.net.Fx:FireAllClients({
+		Name = name,
+		Pos = pos,
+		Source = source,
+	})
+end
+
+function CombatService:_fighterFromHum(hum)
+	local model = hum.Parent
+	if not model then
+		return nil
+	end
+
+	for _, fighter in self.fighters do
+		if fighter.Char == model then
+			return fighter
+		end
+	end
+
+	return nil
+end
+
+return CombatService
+
