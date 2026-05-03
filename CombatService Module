@@ -1,3 +1,5 @@
+-- Here is a preview of a module I wrote a while ago
+
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
